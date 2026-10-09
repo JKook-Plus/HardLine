@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest something HardLine should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The task, not the solution. It is easier to find a good answer from the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+  - type: textarea
+    id: now
+    attributes:
+      label: How you manage today
+      description: Other apps or workarounds you use, if any.

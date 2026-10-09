@@ -1,0 +1,48 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Plug in the camera
+        2. Start the web server
+        3. Open /live.flv in VLC
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HardLine version
+      description: Settings, About.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+      placeholder: Pixel 7, Android 15
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera
+      description: Name and USB ID. More, Device details shows the ID.
+      placeholder: Logitech C920, 046d:082d
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Output of `adb logcat -d`, if you can get it. Read it first, it can contain addresses on your network.
+      render: text

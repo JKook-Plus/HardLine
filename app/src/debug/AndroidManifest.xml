@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Test hook; exists in debug builds only. -->
+        <receiver
+            android:name=".debug.PrefsReceiver"
+            android:exported="true" />
+    </application>
+</manifest>

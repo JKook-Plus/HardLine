@@ -1,0 +1,28 @@
+# Gradle and Android Studio
+.gradle/
+.kotlin/
+build/
+/app/.cxx/
+local.properties
+.idea/
+*.iml
+/captures/
+
+# Signing keys never belong in the repository
+keystore.properties
+*.jks
+*.keystore
+
+# Native dependencies, downloaded by scripts/fetch-deps.sh
+/third_party/
+
+# Local outputs: packaged APKs, test-rig binaries, screenshots, logs
+/dist/
+/out/
+
+# Local toolchains and scratch work
+/tools/
+/research/
+
+__pycache__/
+.DS_Store

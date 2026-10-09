@@ -1,0 +1,38 @@
+Let frame-based H.265 streams through libuvc as opaque compressed frames.
+
+libuvc 0.0.8 knows the MJPEG and H.264 format GUIDs only, so a camera that offers H.265 (under
+either the 'H265' or the 'HEVC' GUID) has no usable format. This adds both GUIDs next to H.264.
+The frames are handed to the app undecoded, exactly as H.264 frames are.
+
+--- a/include/libuvc/libuvc.h
++++ b/include/libuvc/libuvc.h
+@@ -91,6 +91,8 @@
+   UVC_FRAME_FORMAT_I420,
+   /** YUV420: NV21 */
+   UVC_FRAME_FORMAT_NV21,
++  UVC_FRAME_FORMAT_H265,
++  UVC_FRAME_FORMAT_HEVC,
+   /** Number of formats understood */
+   UVC_FRAME_FORMAT_COUNT,
+ };
+--- a/src/stream.c
++++ b/src/stream.c
+@@ -140,12 +140,16 @@
+       {'R',  'G',  'G',  'B', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+     FMT(UVC_FRAME_FORMAT_SBGGR8,
+       {'B',  'G',  'G',  'R', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+-    ABS_FMT(UVC_FRAME_FORMAT_COMPRESSED, 2,
+-      {UVC_FRAME_FORMAT_MJPEG, UVC_FRAME_FORMAT_H264})
++    ABS_FMT(UVC_FRAME_FORMAT_COMPRESSED, 4,
++      {UVC_FRAME_FORMAT_MJPEG, UVC_FRAME_FORMAT_H264, UVC_FRAME_FORMAT_H265, UVC_FRAME_FORMAT_HEVC})
+     FMT(UVC_FRAME_FORMAT_MJPEG,
+       {'M',  'J',  'P',  'G'})
+     FMT(UVC_FRAME_FORMAT_H264,
+       {'H',  '2',  '6',  '4', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
++    FMT(UVC_FRAME_FORMAT_H265,
++      {'H',  '2',  '6',  '5', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
++    FMT(UVC_FRAME_FORMAT_HEVC,
++      {'H',  'E',  'V',  'C', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+ 
+     default:
+       return NULL;

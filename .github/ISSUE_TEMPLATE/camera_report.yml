@@ -1,0 +1,52 @@
+name: Camera report
+description: Tell us how a camera, capture adapter or audio device behaved, working or not
+labels: [camera]
+body:
+  - type: input
+    id: camera
+    attributes:
+      label: Device
+      description: Make and model, or a link to where it is sold.
+    validations:
+      required: true
+  - type: input
+    id: usb
+    attributes:
+      label: USB ID
+      description: Vendor and product ID, from More, Device details.
+      placeholder: 349c:8319
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works
+        - Works with problems
+        - Does not work
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Device details
+      description: The formats and sizes listed under More, Device details.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: What works, what does not, which format and size you used, and how the camera is connected.
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HardLine version
+    validations:
+      required: true

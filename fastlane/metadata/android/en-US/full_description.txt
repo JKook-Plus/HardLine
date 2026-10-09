@@ -1,0 +1,27 @@
+Plug a webcam, endoscope, microscope or HDMI capture adapter into your phone's USB port and HardLine shows the picture. It records, takes stills, and serves the camera to your network.
+
+HardLine talks to the camera itself, so it does not need root and does not depend on the phone's own support for external cameras. Android 8.0 or newer, with a USB port that works in host mode.
+
+<b>Cameras</b>
+• Any USB Video Class camera: YUY2, UYVY, NV12, MJPEG, H.264 and H.265
+• Brightness, contrast, exposure, focus, zoom and the camera's other controls, remembered per camera
+• USB audio, mixed with the phone's microphone if you want
+• The button on the camera takes a picture or starts a recording
+
+<b>Recording</b>
+• MP4 with H.264, HEVC or AV1 and AAC sound
+• Split files, loop recording within a storage budget
+• Motion detection with e-mail alerts and FTP upload
+
+<b>Streaming</b>
+• A web page to watch and control the camera from a browser
+• RTSP server for VLC, OBS and video recorders
+• Live push to RTMP and SRT servers
+• Optional HTTPS
+
+<b>On screen</b>
+• Time, battery, position or your own text over the picture, and a watermark
+• The phone's camera or screen as an inset
+• Picture-in-picture, a floating window and a lock-screen view
+
+No ads, no analytics, no account. Free software under the GNU GPL 3.0.

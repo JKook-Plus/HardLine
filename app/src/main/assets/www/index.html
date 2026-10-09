@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HardLine</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fdf8fd; --surface: #f3edf7; --surface-high: #e9e1ef; --on: #1d1b20; --muted: #5f5a66;
+    --primary: #5b4bc4; --on-primary: #fff; --tonal: #e3dfff; --on-tonal: #170065; --error: #b3261e; --outline: #cac4d0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141218; --surface: #211f26; --surface-high: #2b2930; --on: #e6e0e9; --muted: #b0a9b8;
+      --primary: #c6bfff; --on-primary: #2c1890; --tonal: #44389f; --on-tonal: #e3dfff; --error: #f2b8b5; --outline: #49454f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--on); font: 16px/1.45 system-ui, "Roboto", "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; }
+  header h1 { font-size: 22px; font-weight: 500; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  main { max-width: 1100px; margin: 0 auto; padding: 0 16px 48px; display: grid; gap: 16px; }
+  .card { background: var(--surface); border-radius: 28px; padding: 16px; }
+  .card h2 { font-size: 14px; font-weight: 500; color: var(--primary); margin: 4px 4px 12px; letter-spacing: .1px; }
+  .stage { background: #000; border-radius: 20px; overflow: hidden; display: grid; place-items: center; min-height: 200px; }
+  .stage img { display: block; width: 100%; max-height: 76vh; object-fit: contain; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  button, select, a.button {
+    font: inherit; font-weight: 500; font-size: 14px; border: 0; border-radius: 20px; padding: 10px 20px; min-height: 40px; cursor: pointer;
+    background: var(--tonal); color: var(--on-tonal); text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
+  }
+  button.primary { background: var(--primary); color: var(--on-primary); }
+  button.on { background: var(--error); color: var(--bg); }
+  button.text { background: transparent; color: var(--primary); padding: 10px 12px; }
+  button:disabled { opacity: .4; cursor: default; }
+  select { background: var(--surface-high); color: var(--on); border: 1px solid var(--outline); appearance: auto; max-width: 100%; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 4px; }
+  .chip { background: var(--surface-high); border-radius: 8px; padding: 6px 12px; font-size: 13px; color: var(--muted); }
+  .chip b { color: var(--on); font-weight: 500; }
+  .chip.rec { background: var(--error); color: var(--bg); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 8px 4px; border-top: 1px solid var(--outline); vertical-align: middle; }
+  td.num { text-align: right; color: var(--muted); white-space: nowrap; }
+  td.act { text-align: right; white-space: nowrap; }
+  td.act a { margin-right: 4px; }
+  td a { color: var(--primary); text-decoration: none; word-break: break-all; }
+  code { font: 13px ui-monospace, "Roboto Mono", monospace; word-break: break-all; }
+  dl { margin: 0 4px; font-size: 14px; }
+  dt { color: var(--muted); margin-top: 10px; }
+  dd { margin: 2px 0 0; }
+  .muted { color: var(--muted); font-size: 14px; margin: 4px; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--on); color: var(--bg); padding: 12px 20px;
+    border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
+  #toast.show { opacity: 1; }
+  @media (min-width: 900px) { main { grid-template-columns: 2fr 1fr; } .wide { grid-column: 1 / -1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">HardLine</h1>
+  <span class="chip" id="battery"></span>
+</header>
+<main>
+  <section class="card">
+    <div class="stage"><img id="video" alt="Live video"></div>
+    <div class="row">
+      <button class="primary" id="snap">Take picture</button>
+      <button id="record">Record</button>
+      <button id="motion">Motion detection</button>
+      <button id="sound">Sound</button>
+      <button id="talk" hidden>Hold to talk</button>
+      <a class="button" id="save" download="snapshot.jpg" href="snapshot.jpg">Download frame</a>
+    </div>
+    <audio id="audio"></audio>
+  </section>
+
+  <section class="card">
+    <h2>Camera</h2>
+    <div class="chips" id="chips"></div>
+    <div class="row"><select id="format" aria-label="Video format"></select></div>
+    <h2 style="margin-top:20px">Addresses for players</h2>
+    <dl id="links"></dl>
+  </section>
+
+  <section class="card wide">
+    <h2>Saved files</h2>
+    <p class="muted" id="empty">Nothing has been saved yet.</p>
+    <table id="files"></table>
+    <div class="row"><button class="text" id="refresh">Refresh</button></div>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const $ = id => document.getElementById(id);
+// Addresses are built from the origin, which never carries a user name or password.
+const base = location.origin;
+let status = null, formatsKey = '';
+
+function toast(text) {
+  const t = $('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+async function api(path, options) {
+  const r = await fetch(base + '/api/' + path, options);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.message || r.statusText);
+  return body;
+}
+
+function size(n) {
+  return n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB';
+}
+
+function chip(label, value, cls) {
+  const c = document.createElement('span');
+  c.className = 'chip' + (cls ? ' ' + cls : '');
+  if (value === undefined) c.textContent = label;
+  else { c.append(label + ' '); const b = document.createElement('b'); b.textContent = value; c.append(b); }
+  return c;
+}
+
+async function refreshStatus() {
+  try {
+    status = await api('status');
+  } catch (e) { return; }
+  document.title = status.title;
+  $('title').textContent = status.title;
+  $('battery').textContent = 'Phone battery ' + status.battery + '%';
+  const chips = $('chips');
+  chips.replaceChildren();
+  chips.append(chip(status.device || 'No camera connected'));
+  if (status.format) chips.append(chip(status.format));
+  if (status.device) chips.append(chip('Measured', status.fps.toFixed(1) + ' fps'));
+  if (status.recording) chips.append(chip(status.recordingMotion ? 'Recording movement' : 'Recording', undefined, 'rec'));
+  if (status.clients.length) chips.append(chip('Viewers', String(status.clients.length)));
+  $('record').textContent = status.recording ? 'Stop recording' : 'Record';
+  $('record').classList.toggle('on', status.recording);
+  $('motion').classList.toggle('on', status.motion);
+  $('motion').textContent = status.motion ? 'Motion detection on' : 'Motion detection';
+  $('sound').disabled = !status.audio;
+
+  const key = status.formats.join('|');
+  const select = $('format');
+  if (key !== formatsKey) {
+    formatsKey = key;
+    select.replaceChildren(...status.formats.map((f, i) => new Option(f, i)));
+  }
+  if (document.activeElement !== select) select.value = status.current;
+
+  const links = [['Video (Motion-JPEG)', base + '/video'], ['Video with sound (' + status.flvCodec + ' in FLV)', base + '/live.flv'],
+    ['Sound (Ogg Opus)', base + '/audio.opus'], ['Still picture', base + '/snapshot.jpg']];
+  if (status.rtsp) links.push(['RTSP', status.rtsp]);
+  const dl = $('links');
+  dl.replaceChildren();
+  for (const [name, url] of links) {
+    const dt = document.createElement('dt'); dt.textContent = name;
+    const dd = document.createElement('dd'); const code = document.createElement('code'); code.textContent = url; dd.append(code);
+    dl.append(dt, dd);
+  }
+}
+
+async function refreshFiles() {
+  let list;
+  try { list = (await api('files')).files; } catch (e) { return; }
+  list.sort((a, b) => b.modified - a.modified);
+  $('empty').hidden = list.length > 0;
+  const table = $('files');
+  table.replaceChildren();
+  for (const f of list) {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    const a = document.createElement('a');
+    const url = base + '/files/' + encodeURIComponent(f.name);
+    a.href = url; a.target = '_blank'; a.textContent = f.name;
+    name.append(a);
+    const kind = document.createElement('td'); kind.className = 'num'; kind.textContent = f.video ? (f.motion ? 'Motion video' : 'Video') : 'Picture';
+    const when = document.createElement('td'); when.className = 'num'; when.textContent = new Date(f.modified).toLocaleString();
+    const bytes = document.createElement('td'); bytes.className = 'num'; bytes.textContent = size(f.size);
+    const act = document.createElement('td'); act.className = 'act';
+    const get = document.createElement('a'); get.href = url; get.download = f.name; get.textContent = 'Download';
+    const del = document.createElement('button'); del.className = 'text'; del.textContent = 'Delete';
+    del.onclick = async () => {
+      if (!confirm('Delete ' + f.name + ' from the phone?')) return;
+      const r = await fetch(url, { method: 'DELETE' });
+      toast(r.ok ? 'Deleted' : 'Could not delete');
+      refreshFiles();
+    };
+    act.append(get, del);
+    tr.append(name, kind, when, bytes, act);
+    table.append(tr);
+  }
+}
+
+$('snap').onclick = async () => {
+  try { const r = await api('snapshot'); toast('Saved ' + r.name + ' on the phone'); refreshFiles(); } catch (e) { toast(e.message); }
+};
+$('record').onclick = async () => {
+  try { await api('record?on=' + (status && status.recording ? 0 : 1)); setTimeout(() => { refreshStatus(); refreshFiles(); }, 700); } catch (e) { toast(e.message); }
+};
+$('motion').onclick = async () => {
+  try { await api('motion?on=' + (status && status.motion ? 0 : 1)); setTimeout(refreshStatus, 300); } catch (e) { toast(e.message); }
+};
+$('format').onchange = async e => {
+  try { await api('format?index=' + e.target.value); toast('Changing the video format'); setTimeout(startVideo, 1500); } catch (err) { toast(err.message); }
+};
+$('refresh').onclick = refreshFiles;
+$('save').onclick = () => { $('save').href = base + '/snapshot.jpg?t=' + Date.now(); };
+
+$('sound').onclick = () => {
+  const audio = $('audio');
+  if (audio.paused) {
+    audio.src = base + '/audio.opus?t=' + Date.now();
+    audio.play().then(() => { $('sound').classList.add('on'); $('sound').textContent = 'Sound on'; })
+      .catch(() => toast('This browser cannot play the sound stream'));
+  } else {
+    audio.pause(); audio.removeAttribute('src'); audio.load();
+    $('sound').classList.remove('on'); $('sound').textContent = 'Sound';
+  }
+};
+
+// Talk-back: the browser records while the button is held and the phone plays the clip.
+if (navigator.mediaDevices && window.MediaRecorder) {
+  const talk = $('talk');
+  let recorder = null;
+  talk.hidden = false;
+  const begin = async e => {
+    e.preventDefault();
+    if (recorder) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const parts = [];
+      recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = ev => parts.push(ev.data);
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(parts, { type: recorder.mimeType });
+        recorder = null;
+        talk.classList.remove('on');
+        if (blob.size < 64) return;
+        const r = await fetch(base + '/talk', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
+        toast(r.ok ? 'Sent to the phone' : 'Could not send');
+      };
+      recorder.start();
+      talk.classList.add('on');
+    } catch (err) { toast('The microphone is not available'); }
+  };
+  const end = () => { if (recorder && recorder.state === 'recording') recorder.stop(); };
+  talk.addEventListener('pointerdown', begin);
+  talk.addEventListener('pointerup', end);
+  talk.addEventListener('pointerleave', end);
+}
+
+function startVideo() { $('video').src = base + '/video?t=' + Date.now(); }
+$('video').onerror = () => setTimeout(startVideo, 2000);
+
+startVideo();
+refreshStatus();
+refreshFiles();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>
