@@ -3,7 +3,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -15,7 +14,7 @@ val keystoreProps = Properties().apply {
 
 android {
     namespace = "dev.hardline"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
@@ -89,7 +88,7 @@ kotlin {
 }
 
 // libusb and libuvc are not committed: fetch them before anything compiles.
-val fetchNativeDeps by tasks.registering(Exec::class) {
+val fetchNativeDeps = tasks.register<Exec>("fetchNativeDeps") {
     description = "Downloads libusb and libuvc into third_party/ and applies the patches."
     group = "build setup"
     val script = rootProject.file("scripts/fetch-deps.sh")
