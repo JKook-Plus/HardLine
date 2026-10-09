@@ -9,7 +9,7 @@ exifinterface = "1.4.1"
 documentfile = "1.1.0"
 coroutines = "1.10.2"
 commons-net = "3.12.0"
-android-mail = "1.6.7"
+android-mail = "1.6.8"
 zxing = "3.5.4"
 junit = "4.13.2"
 
