@@ -74,8 +74,12 @@ Download the APK from the [latest release](https://github.com/JKook-Plus/HardLin
 and open it on the phone. Android asks once for permission to install from your browser or file
 manager.
 
-[Obtainium](https://github.com/ImranR98/Obtainium) can track releases for you. Add this repository's
-address as the app source.
+[Obtainium](https://github.com/ImranR98/Obtainium) can track releases for you. Tap the badge on a
+phone that has Obtainium installed and it opens with HardLine ready to add:
+
+<a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/JKook-Plus/HardLine"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="54"></a>
+
+Or add this repository's address as the app source by hand.
 
 Releases are signed with a certificate whose SHA-256 fingerprint is:
 
