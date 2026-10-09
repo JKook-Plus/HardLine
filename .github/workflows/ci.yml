@@ -28,7 +28,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       # libusb and libuvc, as fetched and patched by scripts/fetch-deps.sh
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: third_party
           key: third-party-${{ hashFiles('scripts/fetch-deps.sh', 'app/src/main/cpp/patches/**') }}
