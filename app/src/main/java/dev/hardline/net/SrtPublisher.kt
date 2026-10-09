@@ -467,7 +467,7 @@ class SrtPublisher(private val c: CameraController, override val target: PushTar
         val sink = object : VideoSink, AudioSink {
             override fun onVideoConfig(config_: VideoConfig) { config = config_ }
             override fun onAudioConfig(config: AudioConfig) = Unit
-            override fun onVideoPacket(packet: VideoPacket) = synchronized(mux) {
+            override fun onVideoPacket(packet: VideoPacket): Unit = synchronized(mux) {
                 if (!started) { if (!packet.key) return else started = true }
                 mux.video(config, packet)
             }

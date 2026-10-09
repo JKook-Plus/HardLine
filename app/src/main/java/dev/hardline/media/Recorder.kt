@@ -98,7 +98,7 @@ class Recorder(
         }
     }
 
-    fun setPaused(value: Boolean) = synchronized(lock) {
+    fun setPaused(value: Boolean): Unit = synchronized(lock) {
         if (!active || paused == value) return
         paused = value
         val now = SystemClock.elapsedRealtime()
@@ -201,7 +201,7 @@ class Recorder(
         if (failed) stop()
     }
 
-    override fun onAudioPacket(packet: AudioPacket) = synchronized(lock) {
+    override fun onAudioPacket(packet: AudioPacket): Unit = synchronized(lock) {
         if (!active || paused || muxer == null || needKey || audioTrack < 0) return
         val pts = maxOf(packet.ptsUs - baseUs - gapUs, lastAudioUs + 1)
         if (pts < 0) return

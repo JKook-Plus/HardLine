@@ -191,7 +191,7 @@ class VideoEncoder(
         fun pickEncoder(mime: String, width: Int, height: Int, hardware: Boolean): String? =
             MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
                 info.isEncoder && info.supportedTypes.any { it.equals(mime, true) } && H26xDecoder.isSoftware(info) != hardware &&
-                    runCatching { info.getCapabilitiesForType(mime).videoCapabilities.isSizeSupported(width, height) }.getOrDefault(false)
+                    runCatching { info.getCapabilitiesForType(mime).videoCapabilities?.isSizeSupported(width, height) ?: false }.getOrDefault(false)
             }?.name
 
         fun isSupported(codec: VideoCodec, width: Int, height: Int): Boolean =
