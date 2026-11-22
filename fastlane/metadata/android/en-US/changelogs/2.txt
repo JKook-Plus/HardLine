@@ -1,0 +1,1 @@
+Fixes a black picture on phones that are short of memory: the app now uses smaller USB transfers and retries any the phone refuses. If a camera stops sending video, HardLine restarts the stream, and says so if that does not help. A camera left stuck by an app that was closed mid-stream is reset instead of failing with an I/O error.

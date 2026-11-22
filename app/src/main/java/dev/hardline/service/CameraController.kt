@@ -22,6 +22,7 @@ import android.net.nsd.NsdServiceInfo
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
@@ -151,6 +152,8 @@ class CameraController(val app: Application) {
     private var settingsListener: Any? = null
     private val ejected = HashSet<String>()
     private var cameraButtonDown = false
+    private var stallWatch: Job? = null
+    private val stallRestarts = ArrayDeque<Long>()
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -278,6 +281,9 @@ class CameraController(val app: Application) {
         setMotionDetection(false)
         stopPush()
         setServer(false)
+        stallWatch?.cancel()
+        stallWatch = null
+        stallRestarts.clear()
         session.value = null
         selection.value = null
         audioNotice.value = false
@@ -365,6 +371,8 @@ class CameraController(val app: Application) {
             error.value = "${s.displayName} does not offer a video format this app can show."
             return
         }
+        stallWatch?.cancel()
+        stallWatch = null
         val failure = withContext(Dispatchers.IO) {
             s.stopVideo()
             ingest?.close()
@@ -389,12 +397,58 @@ class CameraController(val app: Application) {
             return
         }
         selection.value = sel
+        ingest?.let { watchForStall(s, sel, it) }
         saveState(s) {
             put("stream", sel.stream.number); put("fourcc", sel.format.fourcc)
             put("width", sel.frame.width); put("height", sel.frame.height); put("interval", sel.interval)
         }
         refreshEncoders()
         updateNotification()
+    }
+
+    /**
+     * Restarts the stream when the camera stops delivering frames, and says so when restarting
+     * does not help. Without this a stream that lost its USB transfers stayed black while the app
+     * still showed it as streaming.
+     */
+    private fun watchForStall(s: UsbSession, sel: Selection, watched: VideoIngest) {
+        // At least STALL_MS, and three frame times for very slow frame rates (interval is in 100 ns).
+        val limitMs = maxOf(STALL_MS, 3L * sel.interval / 10_000)
+        stallWatch = scope.launch {
+            var seen = watched.frames.get()
+            var changedAt = SystemClock.elapsedRealtime()
+            while (true) {
+                delay(1000)
+                val now = SystemClock.elapsedRealtime()
+                val count = watched.frames.get()
+                if (count != seen) {
+                    seen = count
+                    changedAt = now
+                } else if (now - changedAt >= limitMs) {
+                    break
+                }
+            }
+            onStall(s, sel, seen == 0L)
+        }
+    }
+
+    private fun onStall(s: UsbSession, sel: Selection, neverStarted: Boolean) = scope.launch {
+        lock.withLock {
+            if (session.value !== s || selection.value != sel) return@withLock
+            val now = SystemClock.elapsedRealtime()
+            while (stallRestarts.isNotEmpty() && now - stallRestarts.first() > STALL_WINDOW_MS) stallRestarts.removeFirst()
+            if (stallRestarts.size >= STALL_RESTARTS) {
+                Log.w(TAG, "no video after ${stallRestarts.size} restarts, giving up")
+                stallRestarts.clear()
+                error.value = "${s.displayName} stopped sending video and restarting the stream did not help.\n" +
+                    "Unplug the camera and plug it in again. If it keeps happening, close other apps or pick a lower resolution."
+                return@withLock
+            }
+            stallRestarts.addLast(now)
+            Log.w(TAG, if (neverStarted) "no video since the stream started, restarting it" else "video stopped, restarting the stream")
+            messages.tryEmit("No video from the camera, restarting it")
+            startStreamLocked(s, sel)
+        }
     }
 
     fun decoderName(): String? = ingest?.decoderName
@@ -913,6 +967,11 @@ class CameraController(val app: Application) {
 
     companion object {
         private const val TAG = "CameraController"
+        /** How long without a frame before the stream counts as stalled. */
+        private const val STALL_MS = 5_000L
+        /** Restarts allowed within [STALL_WINDOW_MS] before the app gives up and says so. */
+        private const val STALL_RESTARTS = 3
+        private const val STALL_WINDOW_MS = 60_000L
         const val ACTION_PERMISSION = "dev.hardline.USB_PERMISSION"
     }
 }

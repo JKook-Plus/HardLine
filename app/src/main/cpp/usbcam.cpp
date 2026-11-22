@@ -5,6 +5,9 @@
 // optional USB Audio Class capture stream on the same device handle.
 #include <jni.h>
 #include <android/log.h>
+#ifndef NDEBUG
+#include <sys/system_properties.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -74,6 +77,11 @@ struct Session {
     std::mutex listenerLock;     // the button reports on the event thread, whatever the stream is doing
     std::atomic<bool> streaming{false};
     int streamInterface = -1;
+    // Held while a stream starts or stops. The event thread only try_locks it to queue parked
+    // transfers again: stopping waits for callbacks that only the event thread delivers.
+    std::mutex videoLock;
+    int parkedLogged = 0;
+    std::chrono::steady_clock::time_point parkedLoggedAt{};
 
     std::vector<AudioAlt> audioAlts;
     AudioAlt audio;
@@ -280,7 +288,10 @@ void button_cb(int button, int state, void *user) {
 }
 
 void stop_video(Session *s, JNIEnv *env) {
-    if (s->streaming.exchange(false) && s->devh) uvc_stop_streaming(s->devh);
+    if (s->streaming.exchange(false) && s->devh) {
+        std::lock_guard<std::mutex> v(s->videoLock);
+        uvc_stop_streaming(s->devh);
+    }
     std::lock_guard<std::mutex> l(s->listenerLock);
     if (s->videoListener) {
         env->DeleteGlobalRef(s->videoListener);
@@ -307,6 +318,45 @@ bool is_bulk(Session *s, int ifaceNumber) {
     libusb_free_config_descriptor(cfg);
     return bulk;
 }
+
+// Notes in the log when the kernel refuses video transfers and when they are all queued again,
+// at most once a second.
+void log_parked(Session *s, int parked) {
+    if ((parked > 0) == (s->parkedLogged > 0)) return;
+    auto now = std::chrono::steady_clock::now();
+    if (parked > 0 && now - s->parkedLoggedAt < std::chrono::seconds(1)) return;
+    if (parked > 0) LOGW("%d video transfers refused by the kernel, retrying", parked);
+    else LOGI("video transfers queued again");
+    s->parkedLogged = parked;
+    s->parkedLoggedAt = now;
+}
+
+#ifndef NDEBUG
+// Debug builds only: `adb shell setprop debug.hardline.usbfail N` makes N percent of video
+// transfer submissions fail the way they do on a phone that is short of memory. 0 turns it off.
+std::atomic<int> g_fail_percent{0};
+std::atomic<long long> g_fail_checked{0};
+std::atomic<uint32_t> g_fail_seed{12345};
+
+int debug_submit(libusb_transfer *t) {
+    long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - g_fail_checked > 500) {
+        g_fail_checked = now;
+        char value[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.hardline.usbfail", value);
+        g_fail_percent = atoi(value);
+    }
+    int percent = g_fail_percent;
+    if (percent > 0) {
+        uint32_t x = g_fail_seed;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        g_fail_seed = x;
+        if (static_cast<int>(x % 100) < percent) return LIBUSB_ERROR_IO;
+    }
+    return libusb_submit_transfer(t);
+}
+#endif
 
 // ---------------------------------------------------------------- JNI
 
@@ -349,6 +399,10 @@ jlong n_open(JNIEnv *, jclass, jint fd, jboolean video) {
         while (s->running) {
             timeval tv{0, 100000};
             libusb_handle_events_timeout_completed(s->usb, &tv, nullptr);
+            if (s->streaming && s->videoLock.try_lock()) {
+                if (s->streaming && s->devh) log_parked(s, uvc_retry_parked_transfers(s->devh));
+                s->videoLock.unlock();
+            }
         }
     });
     return reinterpret_cast<jlong>(s);
@@ -494,16 +548,15 @@ jstring n_describe(JNIEnv *env, jclass, jlong h) {
     return env->NewStringUTF(j.c_str());
 }
 
-jint n_start_video(JNIEnv *env, jclass, jlong h, jint iface, jint format, jint frame, jint interval, jobject listener) {
-    auto *s = reinterpret_cast<Session *>(h);
-    if (!s || !s->devh) return UVC_ERROR_NO_DEVICE;
-    stop_video(s, env);
-    uvc_streaming_interface_t *sif = stream_interface(s, iface);
-    if (!sif) return UVC_ERROR_INVALID_PARAM;
-
+// Negotiates the format and starts the stream. Leaves the listener set even on failure.
+uvc_error_t start_stream(Session *s, JNIEnv *env, uvc_streaming_interface_t *sif, jint format, jint frame,
+                         jint interval, jobject listener) {
     uvc_stream_ctrl_t ctrl{};
     ctrl.bInterfaceNumber = sif->bInterfaceNumber;
     uvc_claim_if(s->devh, ctrl.bInterfaceNumber);
+    // Stop any stream the camera still thinks is running, as the kernel's uvcvideo driver does:
+    // an app killed mid-stream never sets alternate setting 0 again.
+    libusb_set_interface_alt_setting(s->usbh, ctrl.bInterfaceNumber, 0);
     uvc_query_stream_ctrl(s->devh, &ctrl, 1, UVC_GET_MAX);
     ctrl.bInterfaceNumber = sif->bInterfaceNumber;
     ctrl.bmHint = 1;
@@ -523,14 +576,50 @@ jint n_start_video(JNIEnv *env, jclass, jlong h, jint iface, jint format, jint f
         s->videoListener = env->NewGlobalRef(listener);
     }
     s->streamInterface = sif->bInterfaceNumber;
-    s->streaming = true;
-    e = uvc_start_streaming(s->devh, &ctrl, frame_cb, s, 0);
+    {
+        std::lock_guard<std::mutex> v(s->videoLock);
+        s->streaming = true;
+        e = uvc_start_streaming(s->devh, &ctrl, frame_cb, s, 0);
+    }
     if (e != UVC_SUCCESS) {
         stop_video(s, env);
         set_error(std::string("start stream: ") + uvc_strerror(e));
-        return e;
     }
-    return 0;
+    return e;
+}
+
+// A reset kills the transfer that carries the camera button, and libuvc does not queue it again
+// after an error. Queue it once the event thread has seen it end.
+void restart_status(Session *s) {
+    if (!s->devh || !s->devh->status_xfer) return;
+    for (int i = 0; i < 50; i++) {
+        int r = libusb_submit_transfer(s->devh->status_xfer);
+        if (r != LIBUSB_ERROR_BUSY) {
+            if (r != 0) LOGW("button transfer after reset: %s", libusb_error_name(r));
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+jint n_start_video(JNIEnv *env, jclass, jlong h, jint iface, jint format, jint frame, jint interval, jobject listener) {
+    auto *s = reinterpret_cast<Session *>(h);
+    if (!s || !s->devh) return UVC_ERROR_NO_DEVICE;
+    stop_video(s, env);
+    uvc_streaming_interface_t *sif = stream_interface(s, iface);
+    if (!sif) return UVC_ERROR_INVALID_PARAM;
+    uvc_error_t e = start_stream(s, env, sif, format, frame, interval, listener);
+    if (e == UVC_ERROR_IO) {
+        // Some cameras (349c:8319) left streaming by an app that was killed answer every request
+        // to start with an I/O error until they are re-plugged. A port reset does the same.
+        int r = libusb_reset_device(s->usbh);
+        LOGW("camera refused to start (%s), USB reset %s", uvc_strerror(e), r == 0 ? "done" : libusb_error_name(r));
+        if (r == LIBUSB_SUCCESS) {
+            restart_status(s);
+            e = start_stream(s, env, sif, format, frame, interval, listener);
+        }
+    }
+    return e == UVC_SUCCESS ? 0 : e;
 }
 
 void n_stop_video(JNIEnv *env, jclass, jlong h) {
@@ -636,6 +725,9 @@ const JNINativeMethod kMethods[] = {
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *) {
     g_vm = vm;
+#ifndef NDEBUG
+    uvc_submit_hook = debug_submit;
+#endif
     JNIEnv *env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
     jclass cls = env->FindClass("dev/hardline/usb/UsbNative");
