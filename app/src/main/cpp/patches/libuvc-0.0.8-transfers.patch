@@ -1,0 +1,343 @@
+Keep video transfers small and never drop one the kernel refuses.
+
+libuvc 0.0.8 queues 100 isochronous transfers of up to 32 packets each, about 96 KB per transfer
+for a typical USB 2 camera. The kernel needs one physically contiguous buffer per transfer, and a
+phone that is short of memory refuses blocks that large with ENOMEM. libuvc then freed the refused
+transfer, or, if the very first one failed, all of them while still reporting success. The stream
+lost its transfers one by one and went quiet with no error.
+
+This caps each transfer at 32 KB, parks a refused or failed transfer instead of freeing it, adds
+uvc_retry_parked_transfers() for the event thread to queue parked transfers again, and frees parked
+transfers when the stream stops. uvc_submit_hook lets tests make submissions fail.
+
+--- a/include/libuvc/libuvc.h
++++ b/include/libuvc/libuvc.h
+@@ -643,6 +643,16 @@
+ 
+ void uvc_stop_streaming(uvc_device_handle_t *devh);
+ 
++/* Transfers the kernel refused to queue (phones short of memory answer ENOMEM) are kept rather
++ * than freed. Call this regularly from the thread that handles libusb events; it queues them
++ * again, at most every 20 ms. Returns how many are still waiting. */
++int uvc_retry_parked_transfers(uvc_device_handle_t *devh);
++
++struct libusb_transfer;
++/* When set, libuvc submits its video transfers through this function instead of
++ * libusb_submit_transfer. Meant for tests that need submissions to fail. */
++extern int (*uvc_submit_hook)(struct libusb_transfer *transfer);
++
+ uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t **strmh, uvc_stream_ctrl_t *ctrl);
+ uvc_error_t uvc_stream_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
+ uvc_error_t uvc_stream_get_current_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
+--- a/include/libuvc/libuvc_internal.h
++++ b/include/libuvc/libuvc_internal.h
+@@ -259,6 +259,12 @@
+   void *user_ptr;
+   struct libusb_transfer *transfers[LIBUVC_NUM_TRANSFER_BUFS];
+   uint8_t *transfer_bufs[LIBUVC_NUM_TRANSFER_BUFS];
++  /* transfers the kernel refused, waiting for uvc_retry_parked_transfers(); guarded by cb_mutex */
++  uint8_t parked[LIBUVC_NUM_TRANSFER_BUFS];
++  int num_parked;
++  uint32_t submit_failures;
++  /* only touched by the event thread */
++  struct timespec last_retry;
+   struct uvc_frame frame;
+   enum uvc_frame_format frame_format;
+   struct timespec capture_time_finished;
+--- a/src/stream.c
++++ b/src/stream.c
+@@ -39,6 +39,7 @@
+ #include "libuvc/libuvc.h"
+ #include "libuvc/libuvc_internal.h"
+ #include "errno.h"
++#include <time.h>
+ 
+ #ifdef _MSC_VER
+ 
+@@ -834,10 +835,59 @@
+  *
+  * @param transfer Active transfer
+  */
++int (*uvc_submit_hook)(struct libusb_transfer *transfer) = NULL;
++
++static int _uvc_submit(struct libusb_transfer *transfer) {
++  return uvc_submit_hook ? uvc_submit_hook(transfer) : libusb_submit_transfer(transfer);
++}
++
++/* Frees a transfer for good. Call with cb_mutex held. */
++static void _uvc_free_transfer_locked(uvc_stream_handle_t *strmh, struct libusb_transfer *transfer) {
++  int i;
++  for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
++    if (strmh->transfers[i] == transfer) {
++      free(transfer->buffer);
++      libusb_free_transfer(transfer);
++      strmh->transfers[i] = NULL;
++      if (strmh->parked[i]) {
++        strmh->parked[i] = 0;
++        strmh->num_parked--;
++      }
++      break;
++    }
++  }
++  if (i == LIBUVC_NUM_TRANSFER_BUFS)
++    UVC_DEBUG("transfer %p not found; not freeing!", transfer);
++  pthread_cond_broadcast(&strmh->cb_cond);
++}
++
++/* Keeps a transfer the kernel would not queue, for uvc_retry_parked_transfers(). Call with
++ * cb_mutex held. */
++static void _uvc_park_transfer_locked(uvc_stream_handle_t *strmh, struct libusb_transfer *transfer) {
++  int i;
++  strmh->submit_failures++;
++  for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
++    if (strmh->transfers[i] == transfer) {
++      if (!strmh->parked[i]) {
++        strmh->parked[i] = 1;
++        strmh->num_parked++;
++      }
++      break;
++    }
++  }
++  pthread_cond_broadcast(&strmh->cb_cond);
++}
++
++/*
++ * Every finished transfer is queued again while the stream runs. A transfer is freed only when
++ * the stream stops or the device is gone. One the kernel refuses (ENOMEM when a phone is short of
++ * memory) or that failed as a whole is parked and queued again by uvc_retry_parked_transfers();
++ * stock libuvc freed it, so a stream could lose every transfer and go quiet without an error.
++ */
+ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
+   uvc_stream_handle_t *strmh = transfer->user_data;
+-
+-  int resubmit = 1;
++  enum { RESUBMIT, PARK, FREE } next = RESUBMIT;
++  int r;
+ 
+   switch (transfer->status) {
+   case LIBUSB_TRANSFER_COMPLETED:
+@@ -865,88 +915,72 @@
+       }
+     }
+     break;
+-  case LIBUSB_TRANSFER_CANCELLED: 
+-  case LIBUSB_TRANSFER_ERROR:
+-  case LIBUSB_TRANSFER_NO_DEVICE: {
+-    int i;
++  case LIBUSB_TRANSFER_CANCELLED:
++  case LIBUSB_TRANSFER_NO_DEVICE:
+     UVC_DEBUG("not retrying transfer, status = %d", transfer->status);
+-    pthread_mutex_lock(&strmh->cb_mutex);
+-
+-    /* Mark transfer as deleted. */
+-    for(i=0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+-      if(strmh->transfers[i] == transfer) {
+-        UVC_DEBUG("Freeing transfer %d (%p)", i, transfer);
+-        free(transfer->buffer);
+-        libusb_free_transfer(transfer);
+-        strmh->transfers[i] = NULL;
+-        break;
+-      }
+-    }
+-    if(i == LIBUVC_NUM_TRANSFER_BUFS ) {
+-      UVC_DEBUG("transfer %p not found; not freeing!", transfer);
+-    }
+-
+-    resubmit = 0;
+-
+-    pthread_cond_broadcast(&strmh->cb_cond);
+-    pthread_mutex_unlock(&strmh->cb_mutex);
+-
++    next = FREE;
++    break;
++  case LIBUSB_TRANSFER_ERROR:
++    UVC_DEBUG("transfer failed, parking it, status = %d", transfer->status);
++    next = PARK;
+     break;
+-  }
+   case LIBUSB_TRANSFER_TIMED_OUT:
+   case LIBUSB_TRANSFER_STALL:
+   case LIBUSB_TRANSFER_OVERFLOW:
+     UVC_DEBUG("retrying transfer, status = %d", transfer->status);
+     break;
+   }
+-  
+-  if ( resubmit ) {
+-    if ( strmh->running ) {
+-      int libusbRet = libusb_submit_transfer(transfer);
+-      if (libusbRet < 0)
+-      {
+-        int i;
+-        pthread_mutex_lock(&strmh->cb_mutex);
+ 
+-        /* Mark transfer as deleted. */
+-        for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+-          if (strmh->transfers[i] == transfer) {
+-            UVC_DEBUG("Freeing failed transfer %d (%p)", i, transfer);
+-            free(transfer->buffer);
+-            libusb_free_transfer(transfer);
+-            strmh->transfers[i] = NULL;
+-            break;
+-          }
+-        }
+-        if (i == LIBUVC_NUM_TRANSFER_BUFS) {
+-          UVC_DEBUG("failed transfer %p not found; not freeing!", transfer);
+-        }
++  pthread_mutex_lock(&strmh->cb_mutex);
++  if (next == FREE || !strmh->running) {
++    _uvc_free_transfer_locked(strmh, transfer);
++  } else if (next == PARK) {
++    _uvc_park_transfer_locked(strmh, transfer);
++  } else {
++    r = _uvc_submit(transfer);
++    if (r == LIBUSB_ERROR_NO_DEVICE)
++      _uvc_free_transfer_locked(strmh, transfer);
++    else if (r < 0)
++      _uvc_park_transfer_locked(strmh, transfer);
++  }
++  pthread_mutex_unlock(&strmh->cb_mutex);
++}
+ 
+-        pthread_cond_broadcast(&strmh->cb_cond);
+-        pthread_mutex_unlock(&strmh->cb_mutex);
+-      }
+-    } else {
+-      int i;
+-      pthread_mutex_lock(&strmh->cb_mutex);
++int uvc_retry_parked_transfers(uvc_device_handle_t *devh) {
++  uvc_stream_handle_t *strmh;
++  struct timespec now;
++  int left = 0;
+ 
+-      /* Mark transfer as deleted. */
+-      for(i=0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+-        if(strmh->transfers[i] == transfer) {
+-          UVC_DEBUG("Freeing orphan transfer %d (%p)", i, transfer);
+-          free(transfer->buffer);
+-          libusb_free_transfer(transfer);
+-          strmh->transfers[i] = NULL;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  DL_FOREACH(devh->streams, strmh) {
++    int i, r;
++    long long elapsed_ms = (now.tv_sec - strmh->last_retry.tv_sec) * 1000LL +
++                           (now.tv_nsec - strmh->last_retry.tv_nsec) / 1000000;
++
++    pthread_mutex_lock(&strmh->cb_mutex);
++    if (strmh->running && strmh->num_parked > 0 && elapsed_ms >= 20) {
++      strmh->last_retry = now;
++      for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS && strmh->running && strmh->num_parked > 0; i++) {
++        if (!strmh->parked[i] || !strmh->transfers[i])
++          continue;
++        r = _uvc_submit(strmh->transfers[i]);
++        if (r == 0) {
++          strmh->parked[i] = 0;
++          strmh->num_parked--;
++        } else if (r == LIBUSB_ERROR_NO_DEVICE) {
++          _uvc_free_transfer_locked(strmh, strmh->transfers[i]);
++        } else {
++          /* still no room: try again next time rather than hammering the kernel now */
++          strmh->submit_failures++;
+           break;
+         }
+       }
+-      if(i == LIBUVC_NUM_TRANSFER_BUFS ) {
+-        UVC_DEBUG("orphan transfer %p not found; not freeing!", transfer);
+-      }
+-
+-      pthread_cond_broadcast(&strmh->cb_cond);
+-      pthread_mutex_unlock(&strmh->cb_mutex);
+     }
++    if (strmh->running)
++      left += strmh->num_parked;
++    pthread_mutex_unlock(&strmh->cb_mutex);
+   }
++  return left;
+ }
+ 
+ /** Begin streaming video from the camera into the callback function.
+@@ -1213,9 +1247,18 @@
+         packets_per_transfer = (ctrl->dwMaxVideoFrameSize +
+                                 endpoint_bytes_per_packet - 1) / endpoint_bytes_per_packet;
+ 
+-        /* But keep a reasonable limit: Otherwise we start dropping data */
+-        if (packets_per_transfer > 32)
+-          packets_per_transfer = 32;
++        /* But keep each transfer at 32 KiB or less. The kernel needs one physically
++         * contiguous buffer per transfer, and a phone short of memory refuses anything bigger
++         * (ENOMEM). More, smaller transfers keep the same amount of data queued. */
++        {
++          size_t cap = 32768 / endpoint_bytes_per_packet;
++          if (cap < 1)
++            cap = 1;
++          if (cap > 32)
++            cap = 32;
++          if (packets_per_transfer > cap)
++            packets_per_transfer = cap;
++        }
+         
+         total_transfer_size = packets_per_transfer * endpoint_bytes_per_packet;
+         break;
+@@ -1275,23 +1318,32 @@
+     pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh);
+   }
+ 
++  /* A transfer the kernel refuses now is parked and queued later by
++   * uvc_retry_parked_transfers(), so a moment of memory pressure cannot leave the stream
++   * with few or no transfers. */
++  ret = UVC_SUCCESS;
++  pthread_mutex_lock(&strmh->cb_mutex);
++  memset(strmh->parked, 0, sizeof(strmh->parked));
++  strmh->num_parked = 0;
+   for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
+       transfer_id++) {
+-    ret = libusb_submit_transfer(strmh->transfers[transfer_id]);
+-    if (ret != UVC_SUCCESS) {
+-      UVC_DEBUG("libusb_submit_transfer failed: %d",ret);
++    int r = _uvc_submit(strmh->transfers[transfer_id]);
++    if (r == LIBUSB_ERROR_NO_DEVICE) {
++      UVC_DEBUG("libusb_submit_transfer failed: %d", r);
+       break;
+     }
++    if (r < 0)
++      _uvc_park_transfer_locked(strmh, strmh->transfers[transfer_id]);
+   }
+-
+-  if ( ret != UVC_SUCCESS && transfer_id >= 0 ) {
+-    for ( ; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; transfer_id++) {
+-      free ( strmh->transfers[transfer_id]->buffer );
+-      libusb_free_transfer ( strmh->transfers[transfer_id]);
+-      strmh->transfers[transfer_id] = 0;
++  if (transfer_id < LIBUVC_NUM_TRANSFER_BUFS) {
++    /* the device is gone: free what was never queued */
++    int i;
++    for (i = 0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
++      if (strmh->transfers[i] && (i >= transfer_id || strmh->parked[i]))
++        _uvc_free_transfer_locked(strmh, strmh->transfers[i]);
+     }
+-    ret = UVC_SUCCESS;
+   }
++  pthread_mutex_unlock(&strmh->cb_mutex);
+ 
+   UVC_EXIT(ret);
+   return ret;
+@@ -1537,13 +1589,18 @@
+    *   necessarily completed but they will be free'd in _uvc_stream_callback().
+    */
+   for(i=0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+-    if(strmh->transfers[i] != NULL)
++    if(strmh->transfers[i] != NULL && !strmh->parked[i])
+       libusb_cancel_transfer(strmh->transfers[i]);
+   }
+ 
+-  /* Wait for transfers to complete/cancel */
++  /* Wait for transfers to complete/cancel. Parked ones are not queued, so nothing will ever
++   * complete them: free them here (a callback may park one while we wait). */
+   do {
+     for(i=0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
++      if(strmh->transfers[i] != NULL && strmh->parked[i])
++        _uvc_free_transfer_locked(strmh, strmh->transfers[i]);
++    }
++    for(i=0; i < LIBUVC_NUM_TRANSFER_BUFS; i++) {
+       if(strmh->transfers[i] != NULL)
+         break;
+     }

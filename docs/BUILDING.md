@@ -34,8 +34,18 @@ libusb and libuvc are not in the repository. Before the native build, Gradle run
 It does nothing when the sources are already there, so only the first build needs a network
 connection. To change a version, edit the URL and checksum in the script.
 
-There is one patch. It adds the H.265 format identifiers to libuvc so that cameras with an H.265
-stream have a usable format.
+There are two patches, both for libuvc:
+
+- `libuvc-0.0.8-h265.patch` adds the H.265 format identifiers, so that cameras with an H.265
+  stream have a usable format.
+- `libuvc-0.0.8-transfers.patch` keeps each video transfer at 32 KB or less and keeps a transfer
+  the kernel refuses instead of freeing it. The event thread in `usbcam.cpp` queues those again.
+  Phones that are short of memory refuse large transfers, and stock libuvc then lost them one by
+  one until the picture went black.
+
+`usbcam.cpp` also sets the video interface back to alternate setting 0 before it negotiates a
+format, and resets the USB port once if the camera still answers the start request with an I/O
+error. Both undo what an app killed in the middle of a stream leaves behind.
 
 If you open the project in Android Studio before building once, run `scripts/fetch-deps.sh`
 yourself first. Studio configures CMake during sync, before any Gradle task has run.

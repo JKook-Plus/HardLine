@@ -81,6 +81,12 @@ Two things are driven from outside while it runs:
 - `touch /tmp/vcam-still` freezes the picture and `rm /tmp/vcam-still` lets it move again. Use it
   to test motion detection.
 
+Debug builds can also make video transfers fail the way they do on a phone that is short of
+memory. `adb shell setprop debug.hardline.usbfail 30` fails 30 percent of transfer submissions,
+`100` fails all of them and `0` turns it off. The app logs `video transfers refused by the kernel,
+retrying` (tag `usbcam`) while transfers wait, and restarts the stream if no frame arrives for 5
+seconds (tag `CameraController`).
+
 ### Driving the app
 
 | Script | Purpose |
